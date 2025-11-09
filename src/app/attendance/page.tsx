@@ -71,9 +71,19 @@ function timeStrToTodayMs(hhmm: string): number {
 // dado o schedule do funcionário, retorna blocos que valem HOJE
 function getTodayBlocks(emp?: Employee) {
   if (!emp?.schedule?.length)
-    return [] as Array<{ startMs: number; endMs: number; start: string; end: string }>;
+    return [] as Array<{
+      startMs: number;
+      endMs: number;
+      start: string;
+      end: string;
+    }>;
   const wd = getTodayWeekday();
-  const list: Array<{ startMs: number; endMs: number; start: string; end: string }> = [];
+  const list: Array<{
+    startMs: number;
+    endMs: number;
+    start: string;
+    end: string;
+  }> = [];
   for (const blk of emp.schedule) {
     if (blk.days?.includes(wd)) {
       const sMs = timeStrToTodayMs(blk.start);
@@ -100,9 +110,12 @@ function plannedLabelToday(emp?: Employee) {
   return blocks.map((b) => `${b.start}–${b.end}`).join("; ");
 }
 
-function workedMinutes(att?: { checkIn?: number; checkOut?: number }, nowMs?: number) {
+function workedMinutes(
+  att?: { checkIn?: number; checkOut?: number },
+  nowMs?: number
+) {
   if (!att?.checkIn) return 0;
-  const end = att.checkOut ?? (nowMs ?? Date.now());
+  const end = att.checkOut ?? nowMs ?? Date.now();
   const ms = Math.max(0, end - att.checkIn);
   return Math.floor(ms / 60000);
 }
@@ -116,14 +129,20 @@ function complianceBadge(
   if (!planned) return { text: "—", cls: "bg-gray-100 text-gray-700" };
 
   const worked = workedMinutes(att, nowMs);
-  if (!att?.checkIn) return { text: "aguardando", cls: "bg-yellow-100 text-yellow-800" };
+  if (!att?.checkIn)
+    return { text: "aguardando", cls: "bg-yellow-100 text-yellow-800" };
 
   if (!att?.checkOut) {
-    if (worked >= planned) return { text: "cumpriu (em andamento)", cls: "bg-green-100 text-green-700" };
+    if (worked >= planned)
+      return {
+        text: "cumpriu (em andamento)",
+        cls: "bg-green-100 text-green-700",
+      };
     return { text: "em andamento", cls: "bg-blue-100 text-blue-700" };
   }
 
-  if (worked >= planned) return { text: "cumpriu", cls: "bg-green-100 text-green-700" };
+  if (worked >= planned)
+    return { text: "cumpriu", cls: "bg-green-100 text-green-700" };
   return { text: "incompleto", cls: "bg-red-100 text-red-700" };
 }
 
@@ -132,7 +151,9 @@ export default function AttendancePage() {
   const [ready, setReady] = useState(false);
 
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [attMap, setAttMap] = useState<Record<string, Attendance | undefined>>({});
+  const [attMap, setAttMap] = useState<Record<string, Attendance | undefined>>(
+    {}
+  );
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -142,6 +163,21 @@ export default function AttendancePage() {
     const id = setInterval(() => setNow(Date.now()), 5_000);
     return () => clearInterval(id);
   }, []);
+
+  // normaliza para busca sem acentos/maiúsculas
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  // estado da busca + lista filtrada
+  const [search, setSearch] = useState("");
+  const filteredEmployees = useMemo(
+    () =>
+      employees.filter((e) => normalize(e.name).includes(normalize(search))),
+    [employees, search]
+  );
 
   const employeesCol = useMemo(() => collection(db, "employees"), []);
   const attendanceCol = useMemo(() => collection(db, "attendance"), []);
@@ -187,12 +223,16 @@ export default function AttendancePage() {
           const attRef = doc(db, "attendance", docId);
           const attSnap = await getDoc(attRef);
           map[e.id] = attSnap.exists()
-            ? ({ id: attSnap.id, ...(attSnap.data() as Attendance) } as Attendance)
+            ? ({
+                id: attSnap.id,
+                ...(attSnap.data() as Attendance),
+              } as Attendance)
             : undefined;
         }
         setAttMap(map);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Erro ao carregar presenças";
+        const msg =
+          e instanceof Error ? e.message : "Erro ao carregar presenças";
         setErr(msg);
       } finally {
         setLoading(false);
@@ -231,7 +271,12 @@ export default function AttendancePage() {
         });
         setAttMap((m) => ({
           ...m,
-          [emp.id!]: { ...existing, checkIn: nowVal, status: "present", checkOut: undefined },
+          [emp.id!]: {
+            ...existing,
+            checkIn: nowVal,
+            status: "present",
+            checkOut: undefined,
+          },
         }));
       }
       setNow(Date.now()); // força atualização imediata do contador
@@ -274,12 +319,16 @@ export default function AttendancePage() {
   const handleExportCsvToday = () => {
     const date = todayStr();
     const sep = ";";
-    const rows: string[][] = [["Funcionario", "Entrada", "Saida", "Minutos", "Horas(h:m)"]];
+    const rows: string[][] = [
+      ["Funcionario", "Entrada", "Saida", "Minutos", "Horas(h:m)"],
+    ];
 
     const fmtTime = (t?: number) => (t ? new Date(t).toLocaleTimeString() : "");
     const toHM = (mins: number) => `${Math.floor(mins / 60)}h ${mins % 60}m`;
 
-    const list = employees.filter((e): e is Employee & { id: string } => !!e.id); // só com id
+    const list = employees.filter(
+      (e): e is Employee & { id: string } => !!e.id
+    ); // só com id
     list.forEach((e) => {
       const att = attMap[e.id];
       const endMs = Date.now();
@@ -287,7 +336,13 @@ export default function AttendancePage() {
         ? Math.floor(Math.max(0, (att.checkOut ?? endMs) - att.checkIn) / 60000)
         : 0;
 
-      rows.push([e.name, fmtTime(att?.checkIn), fmtTime(att?.checkOut), String(mins), toHM(mins)]);
+      rows.push([
+        e.name,
+        fmtTime(att?.checkIn),
+        fmtTime(att?.checkOut),
+        String(mins),
+        toHM(mins),
+      ]);
     });
 
     const csvBody = rows
@@ -295,7 +350,12 @@ export default function AttendancePage() {
         r
           .map((cell) => {
             const v = (cell ?? "").toString();
-            if (v.includes(sep) || v.includes(",") || v.includes('"') || v.includes("\n")) {
+            if (
+              v.includes(sep) ||
+              v.includes(",") ||
+              v.includes('"') ||
+              v.includes("\n")
+            ) {
               return `"${v.replace(/"/g, '""')}"`;
             }
             return v;
@@ -320,7 +380,11 @@ export default function AttendancePage() {
   };
 
   if (!ready || !user) {
-    return <div className="min-h-screen flex items-center justify-center">Carregando…</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        Carregando…
+      </div>
+    );
   }
 
   return (
@@ -328,8 +392,17 @@ export default function AttendancePage() {
       <div className="max-w-5xl mx-auto">
         <header className="mb-6">
           <h1 className="text-2xl font-semibold">Presenças (Attendance)</h1>
-          <p className="text-sm text-gray-600">Registre entrada/saída de hoje por funcionário.</p>
-
+          <p className="text-sm text-gray-600">
+            Registre entrada/saída de hoje por funcionário.
+          </p>
+          <div className="mt-3">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por nome..."
+              className="w-full md:w-80 rounded-lg border px-3 py-2 text-sm"
+            />
+          </div>
           <div className="mt-3">
             <button
               type="button"
@@ -347,7 +420,9 @@ export default function AttendancePage() {
         {loading ? (
           <p>Carregando equipe…</p>
         ) : employees.length === 0 ? (
-          <p className="text-sm text-gray-600">Nenhum funcionário ativo. Cadastre em /employees.</p>
+          <p className="text-sm text-gray-600">
+            Nenhum funcionário ativo. Cadastre em /employees.
+          </p>
         ) : (
           <div className="bg-white rounded-xl shadow p-4">
             <table className="min-w-full text-sm">
@@ -364,71 +439,73 @@ export default function AttendancePage() {
                 </tr>
               </thead>
               <tbody>
-                {employees
-                  .filter((e): e is Employee & { id: string } => !!e.id)
-                  .map((e) => {
-                    const att = attMap[e.id];
-                    const fmt = (t?: number) => (t ? new Date(t).toLocaleTimeString() : "-");
-                    const plannedStr = plannedLabelToday(e);
-                    const badge = complianceBadge(att, e, now);
-                    return (
-                      <tr key={e.id} className="border-b last:border-0">
-                        <td className="py-2 pr-3">{e.name}</td>
-                        <td className="py-2 pr-3">{fmt(att?.checkIn)}</td>
-                        <td className="py-2 pr-3">{fmt(att?.checkOut)}</td>
-                        <td className="py-2 pr-3">
-                          <span
-                            className={`px-2 py-1 rounded-full text-xs ${
-                              att?.status === "present"
-                                ? "bg-green-100 text-green-700"
-                                : att?.status === "left"
-                                ? "bg-gray-200 text-gray-700"
-                                : "bg-yellow-100 text-yellow-800"
+                {filteredEmployees.map((e) => {
+                  const eid = String(e.id); // garante string
+                  const att = attMap[eid];
+                  const fmt = (t?: number) =>
+                    t ? new Date(t).toLocaleTimeString() : "-";
+                  const plannedStr = plannedLabelToday(e);
+                  const badge = complianceBadge(att, e, now);
+                  return (
+                    <tr key={e.id} className="border-b last:border-0">
+                      <td className="py-2 pr-3">{e.name}</td>
+                      <td className="py-2 pr-3">{fmt(att?.checkIn)}</td>
+                      <td className="py-2 pr-3">{fmt(att?.checkOut)}</td>
+                      <td className="py-2 pr-3">
+                        <span
+                          className={`px-2 py-1 rounded-full text-xs ${
+                            att?.status === "present"
+                              ? "bg-green-100 text-green-700"
+                              : att?.status === "left"
+                              ? "bg-gray-200 text-gray-700"
+                              : "bg-yellow-100 text-yellow-800"
+                          }`}
+                        >
+                          {att?.status ?? "pending"}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3">{plannedStr}</td>
+                      <td className="py-2 pr-3">
+                        <span
+                          className={`px-2 py-1 rounded-full text-xs ${badge.cls}`}
+                        >
+                          {badge.text}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3">{workedToday(att, now)}</td>
+                      <td className="py-2 pr-3">
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCheckIn(e)}
+                            className="relative z-10 cursor-pointer pointer-events-auto rounded-md border px-2 py-1"
+                          >
+                            Entrada
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCheckOut(e)}
+                            disabled={!att?.checkIn || !!att?.checkOut}
+                            title={
+                              !att?.checkIn
+                                ? "Primeiro registre a Entrada"
+                                : att?.checkOut
+                                ? "Este funcionário já finalizou o turno hoje"
+                                : ""
+                            }
+                            className={`relative z-10 rounded-md border px-2 py-1 ${
+                              !att?.checkIn || !!att?.checkOut
+                                ? "opacity-50 cursor-not-allowed"
+                                : "cursor-pointer pointer-events-auto"
                             }`}
                           >
-                            {att?.status ?? "pending"}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-3">{plannedStr}</td>
-                        <td className="py-2 pr-3">
-                          <span className={`px-2 py-1 rounded-full text-xs ${badge.cls}`}>
-                            {badge.text}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-3">{workedToday(att, now)}</td>
-                        <td className="py-2 pr-3">
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleCheckIn(e)}
-                              className="relative z-10 cursor-pointer pointer-events-auto rounded-md border px-2 py-1"
-                            >
-                              Entrada
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleCheckOut(e)}
-                              disabled={!att?.checkIn || !!att?.checkOut}
-                              title={
-                                !att?.checkIn
-                                  ? "Primeiro registre a Entrada"
-                                  : att?.checkOut
-                                  ? "Este funcionário já finalizou o turno hoje"
-                                  : ""
-                              }
-                              className={`relative z-10 rounded-md border px-2 py-1 ${
-                                !att?.checkIn || !!att?.checkOut
-                                  ? "opacity-50 cursor-not-allowed"
-                                  : "cursor-pointer pointer-events-auto"
-                              }`}
-                            >
-                              Saída
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                            Saída
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

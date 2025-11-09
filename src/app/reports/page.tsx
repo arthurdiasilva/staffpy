@@ -67,6 +67,19 @@ export default function ReportsPage() {
   const [rows, setRows] = useState<
     Array<{ id: string; name: string; days: number; minutes: number }>
   >([]);
+  // normaliza pra busca sem acentos/maiúsculas
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  // estado da busca + linhas filtradas
+  const [search, setSearch] = useState("");
+  const filteredRows = useMemo(
+    () => rows.filter((r) => normalize(r.name).includes(normalize(search))),
+    [rows, search]
+  );
 
   // auth
   useEffect(() => {
@@ -235,6 +248,13 @@ export default function ReportsPage() {
             <option value="month">Este mês</option>
           </select>
 
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Buscar por nome..."
+            className="rounded-md border px-3 py-1 text-sm"
+          />
+
           <button
             type="button"
             onClick={downloadCsv}
@@ -260,7 +280,7 @@ export default function ReportsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {filteredRows.map((r) => (
                   <tr key={r.id} className="border-b last:border-0">
                     <td className="py-2 pr-3">{r.name}</td>
                     <td className="py-2 pr-3">{r.days}</td>

@@ -74,12 +74,14 @@ export default function AttendanceHistoryPage() {
   const attendanceCol = useMemo(() => collection(db, "attendance"), []);
 
   // período (semana corrente por padrão)
-  const [monday, setMonday] = useState<Date>(startOfWeek());
+  const [monday] = useState<Date>(startOfWeek());
   const [days, setDays] = useState<string[]>([]);
 
   // dados
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [attByKey, setAttByKey] = useState<Record<string, Attendance | undefined>>({});
+  const [attByKey, setAttByKey] = useState<
+    Record<string, Attendance | undefined>
+  >({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -87,6 +89,21 @@ export default function AttendanceHistoryPage() {
   const [editKey, setEditKey] = useState<string | null>(null); // `${empId}__${date}`
   const [inTime, setInTime] = useState<string>("");
   const [outTime, setOutTime] = useState<string>("");
+
+  // normaliza para busca sem acentos/maiúsculas
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  // estado da busca + lista filtrada
+  const [search, setSearch] = useState("");
+  const filteredEmployees = useMemo(
+    () =>
+      employees.filter((e) => normalize(e.name).includes(normalize(search))),
+    [employees, search]
+  );
 
   // auth
   useEffect(() => {
@@ -120,7 +137,9 @@ export default function AttendanceHistoryPage() {
         list.sort((a, b) => a.name.localeCompare(b.name));
         setEmployees(list);
       } catch (e) {
-        setErr(e instanceof Error ? e.message : "Erro ao carregar funcionários");
+        setErr(
+          e instanceof Error ? e.message : "Erro ao carregar funcionários"
+        );
       }
     })();
   }, [user, employeesCol]);
@@ -152,10 +171,6 @@ export default function AttendanceHistoryPage() {
     refreshAttendance(days);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, attendanceCol, days]);
-
-  const moveWeek = (delta: number) => {
-    setMonday(startOfWeek(addDays(monday, delta * 7)));
-  };
 
   // abrir editor
   const openEditor = (emp: Employee, date: string) => {
@@ -221,7 +236,7 @@ export default function AttendanceHistoryPage() {
       if (checkOut !== undefined) patch.checkOut = checkOut;
       else patch.checkOut = undefined as unknown as number; // limpar se vazio
 
-    await setDoc(ref, patch, { merge: true });
+      await setDoc(ref, patch, { merge: true });
     }
 
     await refreshAttendance(days);
@@ -240,31 +255,26 @@ export default function AttendanceHistoryPage() {
   };
 
   return !ready || !user ? (
-    <div className="min-h-screen flex items-center justify-center">Carregando…</div>
+    <div className="min-h-screen flex items-center justify-center">
+      Carregando…
+    </div>
   ) : (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-6xl mx-auto">
-        <header className="mb-4 flex items-center gap-3">
+        <header className="mb-4 flex flex-col md:flex-row md:items-center gap-3">
           <h1 className="text-2xl font-semibold">Histórico de Presenças</h1>
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              className="rounded-md border px-2 py-1 text-sm"
-              onClick={() => moveWeek(-1)}
-            >
-              ◀ Semana anterior
-            </button>
-            <button
-              className="rounded-md border px-2 py-1 text-sm"
-              onClick={() => setMonday(startOfWeek())}
-            >
-              Hoje
-            </button>
-            <button
-              className="rounded-md border px-2 py-1 text-sm"
-              onClick={() => moveWeek(1)}
-            >
-              Semana seguinte ▶
-            </button>
+
+          <div>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por nome..."
+              className="w-full md:w-80 rounded-lg border px-3 py-2 text-sm"
+            />
+          </div>
+
+          <div className="md:ml-auto flex items-center gap-2">
+            {/* seus botões: Semana anterior | Hoje | Semana seguinte */}
           </div>
         </header>
 
@@ -290,26 +300,40 @@ export default function AttendanceHistoryPage() {
                 </tr>
               </thead>
               <tbody>
-                {employees.map((e) => (
+                {filteredEmployees.map((e) => (
                   <tr key={e.id} className="border-b last:border-0 align-top">
                     <td className="py-2 pr-3 whitespace-nowrap">{e.name}</td>
                     {days.map((d) => {
                       const key = `${e.id}__${d}`;
                       const att = attByKey[key];
-                      const minutes =
-                        att?.checkIn
-                          ? Math.floor(
-                              Math.max(0, (att.checkOut ?? att.checkIn) - att.checkIn) / 60000
-                            )
-                          : 0;
+                      const minutes = att?.checkIn
+                        ? Math.floor(
+                            Math.max(
+                              0,
+                              (att.checkOut ?? att.checkIn) - att.checkIn
+                            ) / 60000
+                          )
+                        : 0;
                       const isEditing = editKey === key;
 
                       return (
                         <td key={d} className="py-2 pr-3 align-top">
                           {!isEditing ? (
                             <div className="space-y-1">
-                              <div>In: {att ? new Date(att.checkIn ?? 0).toLocaleTimeString() : "-"}</div>
-                              <div>Out: {att?.checkOut ? new Date(att.checkOut).toLocaleTimeString() : "-"}</div>
+                              <div>
+                                In:{" "}
+                                {att
+                                  ? new Date(
+                                      att.checkIn ?? 0
+                                    ).toLocaleTimeString()
+                                  : "-"}
+                              </div>
+                              <div>
+                                Out:{" "}
+                                {att?.checkOut
+                                  ? new Date(att.checkOut).toLocaleTimeString()
+                                  : "-"}
+                              </div>
                               <div className="text-xs text-gray-600">
                                 {minutes} min ({msToHMM(minutes * 60_000)})
                               </div>
@@ -363,7 +387,8 @@ export default function AttendanceHistoryPage() {
                                 )}
                               </div>
                               <p className="text-[10px] text-gray-500">
-                                Dica: deixe vazio para limpar Entrada/Saída individualmente.
+                                Dica: deixe vazio para limpar Entrada/Saída
+                                individualmente.
                               </p>
                             </div>
                           )}

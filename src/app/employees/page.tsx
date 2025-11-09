@@ -59,6 +59,19 @@ export default function EmployeesPage() {
       prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
     );
 
+  // util: busca sem acentos/maiúsculas
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  const [search, setSearch] = useState("");
+  const filteredList = useMemo(
+    () => list.filter((e) => normalize(e.name).includes(normalize(search))),
+    [list, search]
+  );
+
   // autenticação
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -266,6 +279,14 @@ export default function EmployeesPage() {
             Cadastre e gerencie sua equipe.
           </p>
           {err && <p className="text-sm text-red-600 mt-2">{err}</p>}
+          <div className="mt-3">
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por nome..."
+              className="w-full md:w-80 rounded-lg border px-3 py-2 text-sm"
+            />
+          </div>
         </header>
 
         {/* ===== FORM DE CADASTRO ===== */}
@@ -381,7 +402,7 @@ export default function EmployeesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {list.map((e) => (
+                  {filteredList.map((e) => (
                     <tr key={e.id} className="border-b last:border-0 align-top">
                       <td className="py-2 pr-3">{e.name}</td>
                       <td className="py-2 pr-3">{e.role}</td>
@@ -408,12 +429,16 @@ export default function EmployeesPage() {
                             {e.schedule.map((blk, idx) => (
                               <li key={idx} className="text-xs">
                                 <span className="font-medium">
-                                  {blk.days.map((d) => WEEKDAY_LABEL[d]).join(", ")}
+                                  {blk.days
+                                    .map((d) => WEEKDAY_LABEL[d])
+                                    .join(", ")}
                                 </span>{" "}
                                 — {blk.start} às {blk.end}{" "}
                                 <button
                                   type="button"
-                                  onClick={() => removeBlockFromEmployee(e, idx)}
+                                  onClick={() =>
+                                    removeBlockFromEmployee(e, idx)
+                                  }
                                   className="ml-2 text-red-600 underline"
                                   title="Remover este bloco"
                                 >
@@ -431,7 +456,9 @@ export default function EmployeesPage() {
                         {/* Editor inline para adicionar novos blocos depois */}
                         {editingEmpId === e.id && (
                           <div className="mt-3 rounded-lg border p-3 bg-gray-50">
-                            <div className="text-xs mb-2">Adicionar novo bloco</div>
+                            <div className="text-xs mb-2">
+                              Adicionar novo bloco
+                            </div>
                             <div className="flex flex-wrap gap-2 mb-3">
                               {DAYS.map((d) => (
                                 <label
@@ -458,7 +485,9 @@ export default function EmployeesPage() {
                                 <input
                                   type="time"
                                   value={editStart}
-                                  onChange={(e2) => setEditStart(e2.target.value)}
+                                  onChange={(e2) =>
+                                    setEditStart(e2.target.value)
+                                  }
                                   className="ml-2 border rounded px-2 py-1 text-xs"
                                 />
                               </label>
