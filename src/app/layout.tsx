@@ -26,6 +26,9 @@ export default function RootLayout({
             <a href="/attendance" className="underline">
               Presenças
             </a>
+            <a href="/attendance/history" className="underline">
+              Histórico
+            </a>
             <a href="/reports" className="underline">
               Relatórios
             </a>

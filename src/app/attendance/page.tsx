@@ -15,8 +15,9 @@ import {
   where,
   deleteField,
 } from "firebase/firestore";
+import type { Employee, Weekday } from "../../types"; // usa Employee com schedule e o Weekday
 
-// ===== Tipos =====
+// ===== Tipos locais =====
 type Attendance = {
   id?: string;
   ownerId: string;
@@ -26,14 +27,6 @@ type Attendance = {
   checkIn?: number;
   checkOut?: number;
   status: "pending" | "present" | "left";
-};
-
-type Employee = {
-  id: string;
-  ownerId: string;
-  name: string;
-  role?: string;
-  active: boolean;
 };
 
 // ===== Utilidades =====
@@ -62,14 +55,84 @@ function workedToday(att?: Attendance, nowMs?: number) {
   return msToHMM(ms);
 }
 
+function getTodayWeekday(): Weekday {
+  // 0=Dom, 1=Seg, ..., 6=Sáb
+  return new Date().getDay() as Weekday; // <- garante Weekday
+}
+
+// transforma "HH:MM" no timestamp em ms do mesmo dia local
+function timeStrToTodayMs(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d.getTime();
+}
+
+// dado o schedule do funcionário, retorna blocos que valem HOJE
+function getTodayBlocks(emp?: Employee) {
+  if (!emp?.schedule?.length)
+    return [] as Array<{ startMs: number; endMs: number; start: string; end: string }>;
+  const wd = getTodayWeekday();
+  const list: Array<{ startMs: number; endMs: number; start: string; end: string }> = [];
+  for (const blk of emp.schedule) {
+    if (blk.days?.includes(wd)) {
+      const sMs = timeStrToTodayMs(blk.start);
+      const eMs = timeStrToTodayMs(blk.end);
+      if (!Number.isNaN(sMs) && !Number.isNaN(eMs) && eMs > sMs) {
+        list.push({ startMs: sMs, endMs: eMs, start: blk.start, end: blk.end });
+      }
+    }
+  }
+  list.sort((a, b) => a.startMs - b.startMs);
+  return list;
+}
+
+function plannedMinutesToday(emp?: Employee) {
+  const blocks = getTodayBlocks(emp);
+  let total = 0;
+  for (const b of blocks) total += Math.max(0, b.endMs - b.startMs);
+  return Math.floor(total / 60000);
+}
+
+function plannedLabelToday(emp?: Employee) {
+  const blocks = getTodayBlocks(emp);
+  if (!blocks.length) return "-";
+  return blocks.map((b) => `${b.start}–${b.end}`).join("; ");
+}
+
+function workedMinutes(att?: { checkIn?: number; checkOut?: number }, nowMs?: number) {
+  if (!att?.checkIn) return 0;
+  const end = att.checkOut ?? (nowMs ?? Date.now());
+  const ms = Math.max(0, end - att.checkIn);
+  return Math.floor(ms / 60000);
+}
+
+function complianceBadge(
+  att: { checkIn?: number; checkOut?: number } | undefined,
+  emp: Employee | undefined,
+  nowMs?: number
+) {
+  const planned = plannedMinutesToday(emp);
+  if (!planned) return { text: "—", cls: "bg-gray-100 text-gray-700" };
+
+  const worked = workedMinutes(att, nowMs);
+  if (!att?.checkIn) return { text: "aguardando", cls: "bg-yellow-100 text-yellow-800" };
+
+  if (!att?.checkOut) {
+    if (worked >= planned) return { text: "cumpriu (em andamento)", cls: "bg-green-100 text-green-700" };
+    return { text: "em andamento", cls: "bg-blue-100 text-blue-700" };
+  }
+
+  if (worked >= planned) return { text: "cumpriu", cls: "bg-green-100 text-green-700" };
+  return { text: "incompleto", cls: "bg-red-100 text-red-700" };
+}
+
 export default function AttendancePage() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
 
   const [employees, setEmployees] = useState<Employee[]>([]);
-  const [attMap, setAttMap] = useState<Record<string, Attendance | undefined>>(
-    {}
-  );
+  const [attMap, setAttMap] = useState<Record<string, Attendance | undefined>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -119,20 +182,17 @@ export default function AttendancePage() {
         const date = todayStr();
         const map: Record<string, Attendance | undefined> = {};
         for (const e of emps) {
+          if (!e.id) continue; // garante string para índice
           const docId = `${user.uid}__${e.id}__${date}`;
           const attRef = doc(db, "attendance", docId);
           const attSnap = await getDoc(attRef);
           map[e.id] = attSnap.exists()
-            ? ({
-                id: attSnap.id,
-                ...(attSnap.data() as Attendance),
-              } as Attendance)
+            ? ({ id: attSnap.id, ...(attSnap.data() as Attendance) } as Attendance)
             : undefined;
         }
         setAttMap(map);
       } catch (e) {
-        const msg =
-          e instanceof Error ? e.message : "Erro ao carregar presenças";
+        const msg = e instanceof Error ? e.message : "Erro ao carregar presenças";
         setErr(msg);
       } finally {
         setLoading(false);
@@ -142,7 +202,7 @@ export default function AttendancePage() {
 
   // ações
   const handleCheckIn = async (emp: Employee) => {
-    if (!user) return;
+    if (!user || !emp.id) return; // estreita o tipo do id
     const date = todayStr();
     const id = `${user.uid}__${emp.id}__${date}`;
     const ref = doc(db, "attendance", id);
@@ -154,16 +214,16 @@ export default function AttendancePage() {
       if (!existing) {
         const newAtt: Attendance = {
           ownerId: user.uid,
-          employeeId: emp.id,
+          employeeId: emp.id, // emp.id é string aqui
           employeeName: emp.name,
           date,
           checkIn: nowVal,
           status: "present",
         };
         await setDoc(ref, newAtt);
-        setAttMap((m) => ({ ...m, [emp.id]: { id, ...newAtt } }));
+        setAttMap((m) => ({ ...m, [emp.id!]: { id, ...newAtt } }));
       } else {
-        // novo turno: zera sempre o checkOut anterior
+        // novo turno: zera a saída anterior
         await updateDoc(ref, {
           checkIn: nowVal,
           status: "present",
@@ -171,15 +231,9 @@ export default function AttendancePage() {
         });
         setAttMap((m) => ({
           ...m,
-          [emp.id]: {
-            ...existing,
-            checkIn: nowVal,
-            status: "present",
-            checkOut: undefined,
-          },
+          [emp.id!]: { ...existing, checkIn: nowVal, status: "present", checkOut: undefined },
         }));
       }
-
       setNow(Date.now()); // força atualização imediata do contador
     } catch (e) {
       alert(e instanceof Error ? e.message : "Erro no check-in");
@@ -187,66 +241,53 @@ export default function AttendancePage() {
   };
 
   const handleCheckOut = async (emp: Employee) => {
-    if (!user) return;
+    if (!user || !emp.id) return;
     const date = todayStr();
     const id = `${user.uid}__${emp.id}__${date}`;
     const ref = doc(db, "attendance", id);
 
     try {
-      const nowVal = Date.now();
       const existing = attMap[emp.id];
 
-      if (!existing) {
-        const newAtt: Attendance = {
-          ownerId: user.uid,
-          employeeId: emp.id,
-          employeeName: emp.name,
-          date,
-          checkOut: nowVal,
-          status: "left",
-        };
-        await setDoc(ref, newAtt);
-        setAttMap((m) => ({ ...m, [emp.id]: { id, ...newAtt } }));
-        setNow(Date.now());
-      } else {
-        await updateDoc(ref, { checkOut: nowVal, status: "left" });
-        setAttMap((m) => ({
-          ...m,
-          [emp.id]: { ...existing, checkOut: nowVal, status: "left" },
-        }));
-        setNow(Date.now());
+      if (!existing?.checkIn) {
+        alert("Primeiro registre a Entrada deste funcionário.");
+        return;
       }
+      if (existing.checkOut) {
+        alert("Este funcionário já finalizou o turno hoje.");
+        return;
+      }
+
+      const nowVal = Date.now();
+      await updateDoc(ref, { checkOut: nowVal, status: "left" });
+      setAttMap((m) => ({
+        ...m,
+        [emp.id!]: { ...existing, checkOut: nowVal, status: "left" },
+      }));
+      setNow(Date.now());
     } catch (e) {
       alert(e instanceof Error ? e.message : "Erro no check-out");
     }
   };
 
-  // Exportar CSV (hoje) — amigável ao Excel (sep=; + BOM UTF-8)
+  // Exportar CSV (hoje) — amigável ao Excel (sep=; + BOM)
   const handleExportCsvToday = () => {
     const date = todayStr();
     const sep = ";";
-
-    const rows: string[][] = [
-      ["Funcionario", "Entrada", "Saida", "Minutos", "Horas(h:m)"],
-    ];
+    const rows: string[][] = [["Funcionario", "Entrada", "Saida", "Minutos", "Horas(h:m)"]];
 
     const fmtTime = (t?: number) => (t ? new Date(t).toLocaleTimeString() : "");
     const toHM = (mins: number) => `${Math.floor(mins / 60)}h ${mins % 60}m`;
 
-    employees.forEach((e) => {
+    const list = employees.filter((e): e is Employee & { id: string } => !!e.id); // só com id
+    list.forEach((e) => {
       const att = attMap[e.id];
       const endMs = Date.now();
       const mins = att?.checkIn
         ? Math.floor(Math.max(0, (att.checkOut ?? endMs) - att.checkIn) / 60000)
         : 0;
 
-      rows.push([
-        e.name,
-        fmtTime(att?.checkIn),
-        fmtTime(att?.checkOut),
-        String(mins),
-        toHM(mins),
-      ]);
+      rows.push([e.name, fmtTime(att?.checkIn), fmtTime(att?.checkOut), String(mins), toHM(mins)]);
     });
 
     const csvBody = rows
@@ -254,12 +295,7 @@ export default function AttendancePage() {
         r
           .map((cell) => {
             const v = (cell ?? "").toString();
-            if (
-              v.includes(sep) ||
-              v.includes(",") ||
-              v.includes('"') ||
-              v.includes("\n")
-            ) {
+            if (v.includes(sep) || v.includes(",") || v.includes('"') || v.includes("\n")) {
               return `"${v.replace(/"/g, '""')}"`;
             }
             return v;
@@ -284,11 +320,7 @@ export default function AttendancePage() {
   };
 
   if (!ready || !user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        Carregando…
-      </div>
-    );
+    return <div className="min-h-screen flex items-center justify-center">Carregando…</div>;
   }
 
   return (
@@ -296,9 +328,7 @@ export default function AttendancePage() {
       <div className="max-w-5xl mx-auto">
         <header className="mb-6">
           <h1 className="text-2xl font-semibold">Presenças (Attendance)</h1>
-          <p className="text-sm text-gray-600">
-            Registre entrada/saída de hoje por funcionário.
-          </p>
+          <p className="text-sm text-gray-600">Registre entrada/saída de hoje por funcionário.</p>
 
           <div className="mt-3">
             <button
@@ -317,9 +347,7 @@ export default function AttendancePage() {
         {loading ? (
           <p>Carregando equipe…</p>
         ) : employees.length === 0 ? (
-          <p className="text-sm text-gray-600">
-            Nenhum funcionário ativo. Cadastre em /employees.
-          </p>
+          <p className="text-sm text-gray-600">Nenhum funcionário ativo. Cadastre em /employees.</p>
         ) : (
           <div className="bg-white rounded-xl shadow p-4">
             <table className="min-w-full text-sm">
@@ -329,63 +357,78 @@ export default function AttendancePage() {
                   <th className="py-2 pr-3">Entrada</th>
                   <th className="py-2 pr-3">Saída</th>
                   <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Previsto (hoje)</th>
+                  <th className="py-2 pr-3">Cumprimento</th>
                   <th className="py-2 pr-3">Horas (hoje)</th>
                   <th className="py-2 pr-3"></th>
                 </tr>
               </thead>
               <tbody>
-                {employees.map((e) => {
-                  const att = attMap[e.id];
-                  const fmt = (t?: number) =>
-                    t ? new Date(t).toLocaleTimeString() : "-";
-                  return (
-                    <tr key={e.id} className="border-b last:border-0">
-                      <td className="py-2 pr-3">{e.name}</td>
-                      <td className="py-2 pr-3">{fmt(att?.checkIn)}</td>
-                      <td className="py-2 pr-3">{fmt(att?.checkOut)}</td>
-                      <td className="py-2 pr-3">
-                        <span
-                          className={`px-2 py-1 rounded-full text-xs ${
-                            att?.status === "present"
-                              ? "bg-green-100 text-green-700"
-                              : att?.status === "left"
-                              ? "bg-gray-200 text-gray-700"
-                              : "bg-yellow-100 text-yellow-800"
-                          }`}
-                        >
-                          {att?.status ?? "pending"}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3">{workedToday(att, now)}</td>
-                      <td className="py-2 pr-3">
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleCheckIn(e)}
-                            className="relative z-10 cursor-pointer pointer-events-auto rounded-md border px-2 py-1"
-                          >
-                            Entrada
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCheckOut(e)}
-                            disabled={!att?.checkIn}
-                            title={
-                              !att?.checkIn ? "Primeiro registre a Entrada" : ""
-                            }
-                            className={`relative z-10 rounded-md border px-2 py-1 ${
-                              !att?.checkIn
-                                ? "opacity-50 cursor-not-allowed"
-                                : "cursor-pointer pointer-events-auto"
+                {employees
+                  .filter((e): e is Employee & { id: string } => !!e.id)
+                  .map((e) => {
+                    const att = attMap[e.id];
+                    const fmt = (t?: number) => (t ? new Date(t).toLocaleTimeString() : "-");
+                    const plannedStr = plannedLabelToday(e);
+                    const badge = complianceBadge(att, e, now);
+                    return (
+                      <tr key={e.id} className="border-b last:border-0">
+                        <td className="py-2 pr-3">{e.name}</td>
+                        <td className="py-2 pr-3">{fmt(att?.checkIn)}</td>
+                        <td className="py-2 pr-3">{fmt(att?.checkOut)}</td>
+                        <td className="py-2 pr-3">
+                          <span
+                            className={`px-2 py-1 rounded-full text-xs ${
+                              att?.status === "present"
+                                ? "bg-green-100 text-green-700"
+                                : att?.status === "left"
+                                ? "bg-gray-200 text-gray-700"
+                                : "bg-yellow-100 text-yellow-800"
                             }`}
                           >
-                            Saída
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            {att?.status ?? "pending"}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3">{plannedStr}</td>
+                        <td className="py-2 pr-3">
+                          <span className={`px-2 py-1 rounded-full text-xs ${badge.cls}`}>
+                            {badge.text}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3">{workedToday(att, now)}</td>
+                        <td className="py-2 pr-3">
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleCheckIn(e)}
+                              className="relative z-10 cursor-pointer pointer-events-auto rounded-md border px-2 py-1"
+                            >
+                              Entrada
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleCheckOut(e)}
+                              disabled={!att?.checkIn || !!att?.checkOut}
+                              title={
+                                !att?.checkIn
+                                  ? "Primeiro registre a Entrada"
+                                  : att?.checkOut
+                                  ? "Este funcionário já finalizou o turno hoje"
+                                  : ""
+                              }
+                              className={`relative z-10 rounded-md border px-2 py-1 ${
+                                !att?.checkIn || !!att?.checkOut
+                                  ? "opacity-50 cursor-not-allowed"
+                                  : "cursor-pointer pointer-events-auto"
+                              }`}
+                            >
+                              Saída
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
