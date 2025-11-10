@@ -22,6 +22,35 @@ import {
   type Weekday,
 } from "../../types";
 
+// === Helpers de horário/validação ===
+function hhmmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map((x) => parseInt(x, 10));
+  return h * 60 + m;
+}
+
+// retorna true se candidate sobrepõe qualquer bloco existente (para ao menos 1 dia em comum)
+function hasOverlap(
+  existing: ScheduleEntry[] | undefined,
+  candidate: ScheduleEntry
+): boolean {
+  if (!existing || existing.length === 0) return false;
+  const cStart = hhmmToMinutes(candidate.start);
+  const cEnd = hhmmToMinutes(candidate.end);
+  // intervalo válido?
+  if (!(cEnd > cStart)) return true; // considera inválido (fim <= início) como “conflito”
+  for (const blk of existing) {
+    // só compara se compartilha ao menos um dia
+    const shareDay = blk.days.some((d) => candidate.days.includes(d));
+    if (!shareDay) continue;
+    const bStart = hhmmToMinutes(blk.start);
+    const bEnd = hhmmToMinutes(blk.end);
+    // regra de overlap: A.start < B.end && B.start < A.end
+    const overlap = cStart < bEnd && bStart < cEnd;
+    if (overlap) return true;
+  }
+  return false;
+}
+
 const DAYS: Weekday[] = [0, 1, 2, 3, 4, 5, 6]; // Dom..Sáb
 
 export default function EmployeesPage() {
@@ -40,7 +69,7 @@ export default function EmployeesPage() {
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // seleção de horário no CADASTRO (sem precisar "adicionar bloco")
+  // seleção de horário no CADASTRO (entra direto no funcionário)
   const [selDays, setSelDays] = useState<Weekday[]>([]);
   const [start, setStart] = useState("09:00");
   const [end, setEnd] = useState("18:00");
@@ -49,7 +78,7 @@ export default function EmployeesPage() {
       prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
     );
 
-  // edição de horários por funcionário já cadastrado
+  // edição de horários por funcionário já cadastrado (inline por linha)
   const [editingEmpId, setEditingEmpId] = useState<string | null>(null);
   const [editSelDays, setEditSelDays] = useState<Weekday[]>([]);
   const [editStart, setEditStart] = useState("09:00");
@@ -58,6 +87,72 @@ export default function EmployeesPage() {
     setEditSelDays((prev) =>
       prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]
     );
+
+  // ===== Modal de edição de DADOS (nome/role/salário) =====
+  const [editOpen, setEditOpen] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editRole, setEditRole] = useState("");
+  const [editSalary, setEditSalary] = useState<string>("");
+
+  function openEditModal(emp: Employee) {
+    setEditId(emp.id ?? null);
+    setEditName(emp.name ?? "");
+    setEditRole(emp.role ?? "");
+    setEditSalary(
+      typeof emp.salaryBase === "number" ? String(emp.salaryBase) : ""
+    );
+    setEditOpen(true);
+  }
+
+  function closeEditModal() {
+    setEditOpen(false);
+    setEditId(null);
+    setEditName("");
+    setEditRole("");
+    setEditSalary("");
+  }
+
+  async function saveEditModal() {
+    if (!user || !editId) return;
+
+    const salary =
+      editSalary.trim() === ""
+        ? undefined
+        : Number(editSalary.replace(",", "."));
+    if (editSalary && Number.isNaN(salary)) {
+      alert("Salário inválido");
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, "employees", editId), {
+        name: editName.trim(),
+        role: editRole.trim(),
+        salaryBase: salary,
+      });
+
+      // refresh leve da lista
+      setList((prev) =>
+        prev
+          .map((p) =>
+            p.id === editId
+              ? {
+                  ...p,
+                  name: editName.trim(),
+                  role: editRole.trim(),
+                  salaryBase: salary,
+                }
+              : p
+          )
+          .sort((a, b) => a.name.localeCompare(b.name))
+      );
+
+      closeEditModal();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Erro ao salvar edição");
+    }
+  }
 
   // util: busca sem acentos/maiúsculas
   const normalize = (s: string) =>
@@ -71,6 +166,28 @@ export default function EmployeesPage() {
     () => list.filter((e) => normalize(e.name).includes(normalize(search))),
     [list, search]
   );
+  // ordem por nome
+  const [nameAsc, setNameAsc] = useState(true);
+  // aplica ordenação sobre o filtrado
+  const viewList = useMemo(
+    () =>
+      [...filteredList].sort((a, b) =>
+        nameAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)
+      ),
+    [filteredList, nameAsc]
+  );
+
+  // paginação
+  const [pageSize, setPageSize] = useState(10); // 10/20/50
+  const [page, setPage] = useState(1);
+
+  const total = viewList.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const pagedList = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return viewList.slice(start, start + pageSize);
+  }, [viewList, page, pageSize]);
 
   // autenticação
   useEffect(() => {
@@ -107,9 +224,9 @@ export default function EmployeesPage() {
     })();
   }, [user, employeesCol]);
 
-  // adicionar
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // adicionar (cadastro)
+  const handleAdd = async (ev: React.FormEvent) => {
+    ev.preventDefault();
     if (!user) return;
 
     const salary = salaryBase
@@ -123,7 +240,14 @@ export default function EmployeesPage() {
     // monta schedule automaticamente com o que estiver selecionado
     const scheduleToSave: ScheduleEntry[] = [];
     if (selDays.length > 0) {
-      scheduleToSave.push({ days: [...selDays], start, end });
+      // valida fim > início
+      if (!(hhmmToMinutes(end) > hhmmToMinutes(start))) {
+        setErr("Horário inválido: a hora 'Até' deve ser maior que 'De'.");
+        return;
+      }
+      const candidate: ScheduleEntry = { days: [...selDays], start, end };
+
+      scheduleToSave.push(candidate);
     }
 
     const newEmp: Employee = {
@@ -149,7 +273,7 @@ export default function EmployeesPage() {
       setStart("09:00");
       setEnd("18:00");
 
-      // refresh
+      // refresh (leve)
       const q = query(employeesCol, where("ownerId", "==", user.uid));
       const snap = await getDocs(q);
       const data: Employee[] = [];
@@ -173,7 +297,7 @@ export default function EmployeesPage() {
     try {
       await updateDoc(doc(db, "employees", id), { active: !current });
 
-      // refresh leve
+      // refresh leve em memória
       setList((prev) =>
         prev.map((p) => (p.id === id ? { ...p, active: !current } : p))
       );
@@ -196,17 +320,9 @@ export default function EmployeesPage() {
     }
   };
 
-  // ==== EDIÇÃO DE HORÁRIOS (por funcionário) ====
-  const openEdit = (emp: Employee) => {
-    setEditingEmpId((curr) => (curr === emp.id ? null : emp.id ?? null));
-    // reset form de edição
-    setEditSelDays([]);
-    setEditStart("09:00");
-    setEditEnd("18:00");
-  };
-
   const addBlockToEmployee = async (emp: Employee) => {
     if (!emp.id) return;
+
     if (editSelDays.length === 0) {
       alert("Escolha pelo menos um dia.");
       return;
@@ -215,19 +331,49 @@ export default function EmployeesPage() {
       alert("Informe horários de início e fim.");
       return;
     }
-    const newBlock: ScheduleEntry = {
+    // valida fim > início
+    if (!(hhmmToMinutes(editEnd) > hhmmToMinutes(editStart))) {
+      alert("Horário inválido: a hora 'Até' deve ser maior que 'De'.");
+      return;
+    }
+
+    const candidate: ScheduleEntry = {
       days: [...editSelDays],
       start: editStart,
       end: editEnd,
     };
+
+    const isDuplicate = (emp.schedule ?? []).some(
+      (b) =>
+        b.start === candidate.start &&
+        b.end === candidate.end &&
+        b.days.length === candidate.days.length &&
+        b.days.every((d) => candidate.days.includes(d))
+    );
+    if (isDuplicate) {
+      alert("Este bloco já existe para este funcionário.");
+      return;
+    }
+
+    // verifica sobreposição com a agenda atual do funcionário
+    const existsOverlap = hasOverlap(emp.schedule, candidate);
+    if (existsOverlap) {
+      alert(
+        "Conflito de horário: este bloco se sobrepõe a outro já existente em pelo menos um dos dias selecionados."
+      );
+      return;
+    }
+
     try {
       const ref = doc(db, "employees", emp.id);
-      const next = [...(emp.schedule ?? []), newBlock];
+      const next = [...(emp.schedule ?? []), candidate];
       await updateDoc(ref, { schedule: next });
+
       // atualiza UI
       setList((prev) =>
         prev.map((p) => (p.id === emp.id ? { ...p, schedule: next } : p))
       );
+
       // limpa mini-form
       setEditSelDays([]);
       setEditStart("09:00");
@@ -287,6 +433,52 @@ export default function EmployeesPage() {
               className="w-full md:w-80 rounded-lg border px-3 py-2 text-sm"
             />
           </div>
+
+          {/* MODAL DE EDIÇÃO DE DADOS */}
+          {editOpen && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+              <div className="bg-white rounded-xl shadow p-4 w-full max-w-md">
+                <h3 className="text-lg font-medium mb-3">Editar funcionário</h3>
+
+                <div className="grid gap-3">
+                  <input
+                    className="rounded-lg border px-3 py-2"
+                    placeholder="Nome"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                  />
+                  <input
+                    className="rounded-lg border px-3 py-2"
+                    placeholder="Função"
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value)}
+                  />
+                  <input
+                    className="rounded-lg border px-3 py-2"
+                    placeholder="Salário base (opcional)"
+                    inputMode="decimal"
+                    value={editSalary}
+                    onChange={(e) => setEditSalary(e.target.value)}
+                  />
+                </div>
+
+                <div className="mt-4 flex gap-2 justify-end">
+                  <button
+                    onClick={closeEditModal}
+                    className="rounded-md border px-3 py-1"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={saveEditModal}
+                    className="rounded-md bg-black text-white px-3 py-1"
+                  >
+                    Salvar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </header>
 
         {/* ===== FORM DE CADASTRO ===== */}
@@ -390,19 +582,83 @@ export default function EmployeesPage() {
             </p>
           ) : (
             <div className="overflow-x-auto">
+              <div className="mb-3 flex flex-col md:flex-row md:items-center gap-2 text-sm">
+                <div>
+                  Mostrando{" "}
+                  <strong>
+                    {Math.min((page - 1) * pageSize + 1, total)}–
+                    {Math.min(page * pageSize, total)}
+                  </strong>{" "}
+                  de <strong>{total}</strong>
+                </div>
+
+                <div className="md:ml-auto flex items-center gap-2">
+                  <label>Por página:</label>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setPage(1);
+                    }}
+                    className="rounded-md border px-2 py-1"
+                  >
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                    <option value={50}>50</option>
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className={`rounded-md border px-2 py-1 ${
+                      page <= 1 ? "opacity-50 cursor-not-allowed" : ""
+                    }`}
+                    title="Anterior"
+                  >
+                    ←
+                  </button>
+
+                  <span>
+                    pág. <strong>{page}</strong> / {totalPages}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className={`rounded-md border px-2 py-1 ${
+                      page >= totalPages ? "opacity-50 cursor-not-allowed" : ""
+                    }`}
+                    title="Próxima"
+                  >
+                    →
+                  </button>
+                </div>
+              </div>
+
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="text-left border-b">
-                    <th className="py-2 pr-3">Nome</th>
+                    <th className="py-2 pr-3">
+                      <button
+                        type="button"
+                        onClick={() => setNameAsc((v) => !v)}
+                        className="inline-flex items-center gap-1 underline"
+                        title="Ordenar por nome"
+                      >
+                        Nome {nameAsc ? "▲" : "▼"}
+                      </button>
+                    </th>
                     <th className="py-2 pr-3">Função</th>
                     <th className="py-2 pr-3">Salário</th>
                     <th className="py-2 pr-3">Status</th>
                     <th className="py-2 pr-3">Horários</th>
-                    <th className="py-2 pr-3"></th>
+                    <th className="py-2 pr-3">Ações</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredList.map((e) => (
+                  {pagedList.map((e) => (
                     <tr key={e.id} className="border-b last:border-0 align-top">
                       <td className="py-2 pr-3">{e.name}</td>
                       <td className="py-2 pr-3">{e.role}</td>
@@ -485,8 +741,8 @@ export default function EmployeesPage() {
                                 <input
                                   type="time"
                                   value={editStart}
-                                  onChange={(e2) =>
-                                    setEditStart(e2.target.value)
+                                  onChange={(ev) =>
+                                    setEditStart(ev.target.value)
                                   }
                                   className="ml-2 border rounded px-2 py-1 text-xs"
                                 />
@@ -496,7 +752,7 @@ export default function EmployeesPage() {
                                 <input
                                   type="time"
                                   value={editEnd}
-                                  onChange={(e2) => setEditEnd(e2.target.value)}
+                                  onChange={(ev) => setEditEnd(ev.target.value)}
                                   className="ml-2 border rounded px-2 py-1 text-xs"
                                 />
                               </label>
@@ -522,7 +778,7 @@ export default function EmployeesPage() {
                       </td>
 
                       <td className="py-2 pr-3">
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
                           <button
                             onClick={() => toggleActive(e.id, e.active)}
                             className="rounded-md border px-2 py-1"
@@ -531,12 +787,25 @@ export default function EmployeesPage() {
                           </button>
 
                           <button
-                            onClick={() => openEdit(e)}
+                            onClick={() =>
+                              setEditingEmpId((curr) =>
+                                curr === e.id ? null : e.id ?? null
+                              )
+                            }
                             className="rounded-md border px-2 py-1"
+                            title="Editar horários"
                           >
                             {editingEmpId === e.id
                               ? "Fechar editor"
                               : "Editar horários"}
+                          </button>
+
+                          <button
+                            onClick={() => openEditModal(e)}
+                            className="rounded-md border px-2 py-1"
+                            title="Editar dados"
+                          >
+                            Editar dados
                           </button>
 
                           <button

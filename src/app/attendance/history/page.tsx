@@ -104,6 +104,17 @@ export default function AttendanceHistoryPage() {
       employees.filter((e) => normalize(e.name).includes(normalize(search))),
     [employees, search]
   );
+  // ordem por nome
+  const [nameAsc, setNameAsc] = useState(true);
+
+  // aplica ordenação sobre o filtrado
+  const viewEmployees = useMemo(
+    () =>
+      [...filteredEmployees].sort((a, b) =>
+        nameAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)
+      ),
+    [filteredEmployees, nameAsc]
+  );
 
   // auth
   useEffect(() => {
@@ -291,16 +302,20 @@ export default function AttendanceHistoryPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left border-b">
-                  <th className="py-2 pr-3">Funcionário</th>
-                  {days.map((d) => (
-                    <th key={d} className="py-2 pr-3">
-                      {d}
-                    </th>
-                  ))}
+                  <th className="py-2 pr-3">
+                    <button
+                      type="button"
+                      onClick={() => setNameAsc((v) => !v)}
+                      className="inline-flex items-center gap-1 underline"
+                      title="Ordenar por nome"
+                    >
+                      Funcionário {nameAsc ? "▲" : "▼"}
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {filteredEmployees.map((e) => (
+                {viewEmployees.map((e) => (
                   <tr key={e.id} className="border-b last:border-0 align-top">
                     <td className="py-2 pr-3 whitespace-nowrap">{e.name}</td>
                     {days.map((d) => {

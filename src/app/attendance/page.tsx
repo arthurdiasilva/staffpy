@@ -1,7 +1,7 @@
 ﻿// src/app/attendance/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { auth, db } from "../../lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
@@ -15,7 +15,7 @@ import {
   where,
   deleteField,
 } from "firebase/firestore";
-import type { Employee, Weekday } from "../../types"; // usa Employee com schedule e o Weekday
+import type { Employee, Weekday } from "../../types";
 
 // ===== Tipos locais =====
 type Attendance = {
@@ -38,6 +38,10 @@ function todayStr() {
   return `${y}-${m}-${day}`;
 }
 
+function statusOf(att?: { status?: "pending" | "present" | "left" }) {
+  return (att?.status ?? "pending") as "pending" | "present" | "left";
+}
+
 function msToHMM(ms: number) {
   const h = Math.floor(ms / 3_600_000);
   const m = Math.floor((ms % 3_600_000) / 60_000);
@@ -57,7 +61,7 @@ function workedToday(att?: Attendance, nowMs?: number) {
 
 function getTodayWeekday(): Weekday {
   // 0=Dom, 1=Seg, ..., 6=Sáb
-  return new Date().getDay() as Weekday; // <- garante Weekday
+  return new Date().getDay() as Weekday;
 }
 
 // transforma "HH:MM" no timestamp em ms do mesmo dia local
@@ -157,6 +161,17 @@ export default function AttendancePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // toasts
+  type Toast = { id: number; kind: "success" | "error" | "info"; text: string };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const pushToast = useCallback((t: Omit<Toast, "id">) => {
+    const id = Date.now() + Math.random();
+    setToasts((arr) => [...arr, { id, ...t }]);
+    setTimeout(() => {
+      setToasts((arr) => arr.filter((x) => x.id !== id));
+    }, 2500);
+  }, []);
+
   // relógio: re-render a cada 5s
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -171,7 +186,7 @@ export default function AttendancePage() {
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "");
 
-  // estado da busca + lista filtrada
+  // busca
   const [search, setSearch] = useState("");
   const filteredEmployees = useMemo(
     () =>
@@ -179,8 +194,56 @@ export default function AttendancePage() {
     [employees, search]
   );
 
+  // filtro por status
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "present" | "left" | "pending"
+  >("all");
+
+  // ordenação
+  const [nameAsc, setNameAsc] = useState(true);
+
+  // aplica filtro + ordenação
+  const viewEmployees = useMemo(
+    () =>
+      [...filteredEmployees]
+        .filter((e) => {
+          if (statusFilter === "all") return true;
+          const att = attMap[String(e.id)];
+          return statusOf(att) === statusFilter;
+        })
+        .sort((a, b) =>
+          nameAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)
+        ),
+    [filteredEmployees, nameAsc, statusFilter, attMap]
+  );
+
+  // apenas funcionários com id definido (evita erro de indexação)
+  const safeEmployees = useMemo(
+    () => viewEmployees.filter((e): e is Employee & { id: string } => !!e.id),
+    [viewEmployees]
+  );
+
+  const [pageSize, setPageSize] = useState(10);
+  const [page, setPage] = useState(1);
+  const total = safeEmployees.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // se mudar filtro/busca/tamanho, volta para página 1
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter, pageSize]);
+
+  // se a página atual ficar maior que o total (depois de filtros), corrige
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const pagedEmployees = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return safeEmployees.slice(start, start + pageSize);
+  }, [safeEmployees, page, pageSize]);
+
   const employeesCol = useMemo(() => collection(db, "employees"), []);
-  const attendanceCol = useMemo(() => collection(db, "attendance"), []);
 
   // autenticação
   useEffect(() => {
@@ -194,8 +257,10 @@ export default function AttendancePage() {
 
   // carregar equipe + presenças do dia
   useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+
     (async () => {
-      if (!user) return;
       setLoading(true);
       setErr(null);
       try {
@@ -206,19 +271,21 @@ export default function AttendancePage() {
           where("active", "==", true)
         );
         const snapEmp = await getDocs(qEmp);
+
         const emps: Employee[] = [];
         snapEmp.forEach((d) => {
           const v = d.data() as Omit<Employee, "id">;
           emps.push({ id: d.id, ...v });
         });
         emps.sort((a, b) => a.name.localeCompare(b.name));
-        setEmployees(emps);
+        if (!cancelled) setEmployees(emps);
 
         // 2) presenças do dia (1 doc por funcionário/dia)
         const date = todayStr();
         const map: Record<string, Attendance | undefined> = {};
+
         for (const e of emps) {
-          if (!e.id) continue; // garante string para índice
+          if (!e.id) continue;
           const docId = `${user.uid}__${e.id}__${date}`;
           const attRef = doc(db, "attendance", docId);
           const attSnap = await getDoc(attRef);
@@ -229,20 +296,28 @@ export default function AttendancePage() {
               } as Attendance)
             : undefined;
         }
-        setAttMap(map);
+
+        if (!cancelled) setAttMap(map);
       } catch (e) {
-        const msg =
+        const message =
           e instanceof Error ? e.message : "Erro ao carregar presenças";
-        setErr(msg);
+        if (!cancelled) {
+          setErr(message);
+          pushToast({ kind: "error", text: message });
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
-  }, [user, employeesCol, attendanceCol]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, employeesCol, pushToast]);
 
   // ações
   const handleCheckIn = async (emp: Employee) => {
-    if (!user || !emp.id) return; // estreita o tipo do id
+    if (!user || !emp.id) return;
     const date = todayStr();
     const id = `${user.uid}__${emp.id}__${date}`;
     const ref = doc(db, "attendance", id);
@@ -254,7 +329,7 @@ export default function AttendancePage() {
       if (!existing) {
         const newAtt: Attendance = {
           ownerId: user.uid,
-          employeeId: emp.id, // emp.id é string aqui
+          employeeId: emp.id,
           employeeName: emp.name,
           date,
           checkIn: nowVal,
@@ -271,17 +346,20 @@ export default function AttendancePage() {
         });
         setAttMap((m) => ({
           ...m,
-          [emp.id!]: {
-            ...existing,
-            checkIn: nowVal,
-            status: "present",
-            checkOut: undefined,
-          },
+          [emp.id!]: { ...existing, checkOut: nowVal, status: "left" },
         }));
       }
-      setNow(Date.now()); // força atualização imediata do contador
+
+      setNow(Date.now());
+      pushToast({
+        kind: "success",
+        text: `Entrada registrada para ${emp.name}`,
+      });
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Erro no check-in");
+      pushToast({
+        kind: "error",
+        text: e instanceof Error ? e.message : "Erro no check-in",
+      });
     }
   };
 
@@ -295,11 +373,17 @@ export default function AttendancePage() {
       const existing = attMap[emp.id];
 
       if (!existing?.checkIn) {
-        alert("Primeiro registre a Entrada deste funcionário.");
+        pushToast({
+          kind: "info",
+          text: "Primeiro registre a Entrada deste funcionário.",
+        });
         return;
       }
       if (existing.checkOut) {
-        alert("Este funcionário já finalizou o turno hoje.");
+        pushToast({
+          kind: "info",
+          text: "Este funcionário já finalizou o turno hoje.",
+        });
         return;
       }
 
@@ -307,11 +391,15 @@ export default function AttendancePage() {
       await updateDoc(ref, { checkOut: nowVal, status: "left" });
       setAttMap((m) => ({
         ...m,
-        [emp.id!]: { ...existing, checkOut: nowVal, status: "left" },
+        [String(emp.id)]: { ...existing, checkOut: nowVal, status: "left" },
       }));
       setNow(Date.now());
+      pushToast({ kind: "success", text: `Saída registrada para ${emp.name}` });
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Erro no check-out");
+      pushToast({
+        kind: "error",
+        text: e instanceof Error ? e.message : "Erro no check-out",
+      });
     }
   };
 
@@ -328,9 +416,9 @@ export default function AttendancePage() {
 
     const list = employees.filter(
       (e): e is Employee & { id: string } => !!e.id
-    ); // só com id
+    );
     list.forEach((e) => {
-      const att = attMap[e.id];
+      const att = attMap[String(e.id)];
       const endMs = Date.now();
       const mins = att?.checkIn
         ? Math.floor(Math.max(0, (att.checkOut ?? endMs) - att.checkIn) / 60000)
@@ -395,6 +483,7 @@ export default function AttendancePage() {
           <p className="text-sm text-gray-600">
             Registre entrada/saída de hoje por funcionário.
           </p>
+
           <div className="mt-3">
             <input
               value={search}
@@ -403,6 +492,23 @@ export default function AttendancePage() {
               className="w-full md:w-80 rounded-lg border px-3 py-2 text-sm"
             />
           </div>
+
+          <div className="mt-2">
+            <select
+              value={statusFilter}
+              onChange={(e) =>
+                setStatusFilter(e.target.value as typeof statusFilter)
+              }
+              className="w-full md:w-60 rounded-lg border px-3 py-2 text-sm"
+              title="Filtrar por status do dia"
+            >
+              <option value="all">Todos os status</option>
+              <option value="present">Em andamento</option>
+              <option value="left">Finalizado</option>
+              <option value="pending">Pendente</option>
+            </select>
+          </div>
+
           <div className="mt-3">
             <button
               type="button"
@@ -418,17 +524,82 @@ export default function AttendancePage() {
         </header>
 
         {loading ? (
-          <p>Carregando equipe…</p>
-        ) : employees.length === 0 ? (
+          <p>Carregando…</p>
+        ) : viewEmployees.length === 0 ? (
           <p className="text-sm text-gray-600">
             Nenhum funcionário ativo. Cadastre em /employees.
           </p>
         ) : (
           <div className="bg-white rounded-xl shadow p-4">
+            {/* Controles de paginação */}
+            <div className="mb-3 flex flex-col md:flex-row md:items-center gap-2 text-sm">
+              <div>
+                Mostrando{" "}
+                <strong>
+                  {Math.min((page - 1) * pageSize + 1, total)}–
+                  {Math.min(page * pageSize, total)}
+                </strong>{" "}
+                de <strong>{total}</strong>
+              </div>
+
+              <div className="md:ml-auto flex items-center gap-2">
+                <label>Por página:</label>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(1);
+                  }}
+                  className="rounded-md border px-2 py-1"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className={`rounded-md border px-2 py-1 ${
+                    page <= 1 ? "opacity-50 cursor-not-allowed" : ""
+                  }`}
+                  title="Anterior"
+                >
+                  ←
+                </button>
+
+                <span>
+                  pág. <strong>{page}</strong> / {totalPages}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  className={`rounded-md border px-2 py-1 ${
+                    page >= totalPages ? "opacity-50 cursor-not-allowed" : ""
+                  }`}
+                  title="Próxima"
+                >
+                  →
+                </button>
+              </div>
+            </div>
+
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left border-b">
-                  <th className="py-2 pr-3">Funcionário</th>
+                  <th className="py-2 pr-3">
+                    <button
+                      type="button"
+                      onClick={() => setNameAsc((v) => !v)}
+                      className="inline-flex items-center gap-1 underline"
+                      title="Ordenar por nome"
+                    >
+                      Funcionário {nameAsc ? "▲" : "▼"}
+                    </button>
+                  </th>
                   <th className="py-2 pr-3">Entrada</th>
                   <th className="py-2 pr-3">Saída</th>
                   <th className="py-2 pr-3">Status</th>
@@ -439,13 +610,13 @@ export default function AttendancePage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredEmployees.map((e) => {
-                  const eid = String(e.id); // garante string
-                  const att = attMap[eid];
+                {pagedEmployees.map((e) => {
+                  const att = attMap[e.id]; // <— (corrigido) uma única linha, e.id correto
                   const fmt = (t?: number) =>
                     t ? new Date(t).toLocaleTimeString() : "-";
                   const plannedStr = plannedLabelToday(e);
                   const badge = complianceBadge(att, e, now);
+
                   return (
                     <tr key={e.id} className="border-b last:border-0">
                       <td className="py-2 pr-3">{e.name}</td>
@@ -508,6 +679,25 @@ export default function AttendancePage() {
                 })}
               </tbody>
             </table>
+
+            {/* Toast container (uma vez só, fora do map) */}
+            <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-50">
+              {toasts.map((t) => (
+                <div
+                  key={t.id}
+                  className={[
+                    "min-w-[220px] max-w-[320px] rounded-lg px-3 py-2 shadow text-sm",
+                    t.kind === "success" && "bg-green-600 text-white",
+                    t.kind === "error" && "bg-red-600 text-white",
+                    t.kind === "info" && "bg-gray-800 text-white",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {t.text}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

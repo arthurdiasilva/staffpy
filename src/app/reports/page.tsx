@@ -81,6 +81,25 @@ export default function ReportsPage() {
     [rows, search]
   );
 
+  // ordem por nome
+  const [nameAsc, setNameAsc] = useState(true);
+
+  // aplica ordenação sobre o filtrado
+  const viewRows = useMemo(
+    () =>
+      [...filteredRows].sort((a, b) =>
+        nameAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)
+      ),
+    [filteredRows, nameAsc]
+  );
+
+  // total geral (considera a lista que está sendo exibida)
+  const totalMinutes = useMemo(
+    () => viewRows.reduce((sum, r) => sum + r.minutes, 0),
+    [viewRows]
+  );
+  const totalHM = `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+
   // auth
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -237,6 +256,10 @@ export default function ReportsPage() {
           </p>
         </header>
 
+        <div className="mt-2 text-sm text-gray-700">
+          Total do período (filtrado): <strong>{totalHM}</strong>
+        </div>
+
         <div className="bg-white rounded-xl shadow p-4 mb-4 flex items-center gap-3">
           <label className="text-sm">Período:</label>
           <select
@@ -274,13 +297,22 @@ export default function ReportsPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left border-b">
-                  <th className="py-2 pr-3">Funcionário</th>
+                  <th className="py-2 pr-3">
+                    <button
+                      type="button"
+                      onClick={() => setNameAsc((v) => !v)}
+                      className="inline-flex items-center gap-1 underline"
+                      title="Ordenar por nome"
+                    >
+                      Funcionário {nameAsc ? "▲" : "▼"}
+                    </button>
+                  </th>
                   <th className="py-2 pr-3">Dias trabalhados</th>
                   <th className="py-2 pr-3">Horas (h:m)</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map((r) => (
+                {viewRows.map((r) => (
                   <tr key={r.id} className="border-b last:border-0">
                     <td className="py-2 pr-3">{r.name}</td>
                     <td className="py-2 pr-3">{r.days}</td>
